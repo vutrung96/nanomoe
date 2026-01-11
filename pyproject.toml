@@ -1,0 +1,33 @@
+[project]
+name = "nanoqwen"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=2.14.0",
+    "transformers>=4.30.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.65.0",
+    "huggingface-hub>=0.16.0",
+    "torch",
+    "pybind11>=3.0.1",
+    "jupyter>=1.1.1",
+    "pytest>=8.0.0",
+]
+
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.extra-build-dependencies]
+transformer-engine = ["pybind11"]
+
+[tool.setuptools.packages.find]
+include = ["nanoqwen*"]
