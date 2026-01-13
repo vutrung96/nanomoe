@@ -26,7 +26,7 @@ def test_config():
         rms_norm_eps=1e-6,
         rope_theta=10000.0,
         attention_bias=False,  # Qwen3 has no attention bias by default
-        norm_topk_prob=False,
+        norm_topk_prob=True,
     )
     config._attn_implementation = "eager"
     return config

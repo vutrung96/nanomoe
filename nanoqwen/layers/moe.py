@@ -56,7 +56,7 @@ class Experts(nn.Module):
 
         for i in range(self.config.num_experts):
             chunk_start = 0 if i == 0 else expert_tokens_count[i - 1]
-            chunk_end = chunk_start + expert_tokens_count[i]
+            chunk_end = expert_tokens_count[i]
 
             if chunk_start == chunk_end:
                 continue
@@ -66,7 +66,6 @@ class Experts(nn.Module):
                 F.silu(chunk @ self.gate_proj[i, ...]) * (chunk @ self.up_proj[i, ...])
             ) @ self.down_proj[i, ...]
             output.append(output_chunk)
-            chunk_start += expert_tokens_count[i]
 
         return torch.concat(output, 0)
 
@@ -91,7 +90,7 @@ class MOE(nn.Module):
         )
         expert_token_probs = torch.masked_select(flat_routing_probs, flat_routing_map)
         expert_tokens = torch.index_select(flat_x, 0, expert_token_idxs)
-        expert_tokens_count = flat_routing_map.sum(dim=1)
+        expert_tokens_count = flat_routing_map.sum(dim=1).cumsum(0)
 
         ffn_tokens = self.experts(expert_tokens, expert_tokens_count)
         print(
@@ -105,6 +104,8 @@ class MOE(nn.Module):
         )
 
         output = torch.zeros(bsz * seq, self.config.hidden_size).scatter_add_(
-            0, expert_token_idxs.unsqueeze(-1), ffn_tokens
+            0,
+            expert_token_idxs.unsqueeze(-1).expand(-1, self.config.hidden_size),
+            ffn_tokens,
         )
         return output

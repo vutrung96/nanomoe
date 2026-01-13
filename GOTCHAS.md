@@ -178,3 +178,112 @@ routing_probs = routing_probs / routing_probs.sum(-1, keepdim=True)
 **Why:** HuggingFace normalizes only the top-k weights so they sum to 1. Normalizing all probs is redundant (softmax already sums to 1) and doesn't match HF behavior.
 
 **Test that catches it:** `test_router_weights_vs_hf` - top-k weight mismatch.
+
+---
+
+### 12. Missing dim=-1 in Router softmax
+
+**Date**: 2026-01-13
+**Component**: Router
+**Severity**: High
+
+**Bug:** Called softmax without explicit dimension, causing different expert selection.
+```python
+# Wrong - implicit dimension choice (deprecated warning)
+routing_probs = F.softmax(self.gate(x))
+
+# Correct - explicit last dimension
+routing_probs = F.softmax(self.gate(x), dim=-1)
+```
+**Why:** Without `dim=-1`, PyTorch uses the last dimension by default but behavior can be inconsistent with 3D inputs. This caused the router to select different experts than HF, even with identical weights.
+
+**Test that catches it:** `test_router_weights_vs_hf` - expert selection mismatch.
+
+---
+
+### 13. Expert token counts need cumsum for chunk boundaries
+
+**Date**: 2026-01-13
+**Component**: MOE
+**Severity**: High
+
+**Bug:** Used per-expert counts directly as chunk boundaries instead of cumulative counts.
+```python
+# Wrong - gives per-expert counts [128, 130, 127, 127]
+expert_tokens_count = flat_routing_map.sum(dim=1)
+
+# Correct - cumulative for chunk boundaries [128, 258, 385, 512]
+expert_tokens_count = flat_routing_map.sum(dim=1).cumsum(0)
+```
+**Why:** When chunking tokens for each expert, we need cumulative indices. With counts `[128, 130, ...]`, expert 1 should start at index 128 (not 130). Without cumsum, chunk boundaries overlap incorrectly.
+
+**Test that catches it:** `test_moe_output_vs_hf` - numerical mismatch due to wrong token-expert assignment.
+
+---
+
+### 14. scatter_add index must match source dimensions
+
+**Date**: 2026-01-13
+**Component**: MOE
+**Severity**: High
+
+**Bug:** Index tensor had wrong shape for scatter_add operation.
+```python
+# Wrong - index is (N, 1), source is (N, hidden_size)
+output = torch.zeros(...).scatter_add_(0, expert_token_idxs.unsqueeze(-1), ffn_tokens)
+
+# Correct - expand index to match source shape
+output = torch.zeros(...).scatter_add_(
+    0,
+    expert_token_idxs.unsqueeze(-1).expand(-1, hidden_size),
+    ffn_tokens
+)
+```
+**Why:** `scatter_add_` requires the index tensor to have the same number of dimensions as the source tensor. The index must be expanded to `(N, hidden_size)` to match `ffn_tokens`.
+
+**Test that catches it:**
+- Forward: `RuntimeError: Index tensor must have the same number of dimensions as self tensor`
+- Backward: `RuntimeError: ScatterAddBackward0 returned invalid gradient shape [512, 1] expected [512, 256]`
+
+---
+
+### 15. Missing device placement for output tensor
+
+**Date**: 2026-01-13
+**Component**: MOE
+**Severity**: Medium
+
+**Bug:** Created output tensor on CPU while other tensors were on GPU.
+```python
+# Wrong - tensor created on CPU
+output = torch.zeros(bsz * seq, hidden_size).scatter_add_(...)
+
+# Correct - match input device
+output = torch.zeros(bsz * seq, hidden_size, device=x.device).scatter_add_(...)
+```
+**Why:** When running on GPU, all tensors in an operation must be on the same device. Creating zeros without specifying device defaults to CPU.
+
+**Test that catches it:** `RuntimeError: Expected all tensors to be on the same device`
+
+---
+
+### 16. norm_topk_prob config flag controls weight normalization
+
+**Date**: 2026-01-13
+**Component**: Router
+**Severity**: High
+
+**Bug:** Always normalized top-k weights regardless of config setting.
+```python
+# Wrong - always normalizes
+routing_probs = routing_probs / top_k_probs.sum(-1, keepdim=True)
+
+# Correct - respect config flag
+if self.config.norm_topk_prob:
+    routing_probs = routing_probs / top_k_probs.sum(-1, keepdim=True)
+```
+**Why:** HuggingFace Qwen3 MoE has a `norm_topk_prob` config flag (default: False in some configs). If your implementation always normalizes but HF doesn't (or vice versa), outputs will differ by a consistent scaling factor per token.
+
+**Test that catches it:** `test_moe_output_vs_hf` - outputs differ by ratio of ~1.66x (1/sum_of_topk_weights).
+
+**Debugging tip:** If you see consistent per-token scaling differences, check the `norm_topk_prob` config value.
