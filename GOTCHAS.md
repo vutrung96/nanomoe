@@ -287,3 +287,78 @@ if self.config.norm_topk_prob:
 **Test that catches it:** `test_moe_output_vs_hf` - outputs differ by ratio of ~1.66x (1/sum_of_topk_weights).
 
 **Debugging tip:** If you see consistent per-token scaling differences, check the `norm_topk_prob` config value.
+
+## Model
+
+### 17. Missing `super().__init__()` in nn.Module subclass
+
+**Date**: 2026-01-14
+**Component**: Model
+**Severity**: High
+
+**Bug:** Forgot to call `super().__init__()` in the Model class.
+```python
+# Wrong - missing super().__init__()
+class Model(nn.Module):
+    def __init__(self, config):
+        self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        # ...
+
+# Correct
+class Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        # ...
+```
+**Why:** PyTorch's `nn.Module` requires `super().__init__()` to set up internal state like `_modules`, `_parameters`, etc. Without it, submodules won't be registered and you'll get `AttributeError: cannot assign module before Module.__init__() call`.
+
+**Test that catches it:** Any test that instantiates the Model class.
+
+---
+
+### 18. Tensor indexing vs shape access
+
+**Date**: 2026-01-14
+**Component**: Model/RoPE
+**Severity**: High
+
+**Bug:** Used tensor indexing `x[1]` instead of shape access `x.shape[1]` to get sequence length.
+```python
+# Wrong - indexes into tensor values, not shape
+seq_len = x[1]  # Returns a tensor slice, not an integer
+
+# Also wrong - still indexing into tensor
+seq_len = x[1]  # TypeError: 'Tensor' object cannot be interpreted as an integer
+
+# Correct - access shape tuple
+seq_len = x.shape[1]  # Returns integer
+```
+**Why:** `x[1]` slices the tensor along the first dimension (returns row 1). `x.shape[1]` accesses the shape tuple and returns the size of dimension 1 as an integer.
+
+**Test that catches it:** `TypeError: 'Tensor' object cannot be interpreted as an integer` when passing to `torch.arange()` or similar functions expecting int.
+
+---
+
+### 19. RoPE must slice to actual sequence length
+
+**Date**: 2026-01-14
+**Component**: Model/RoPE
+**Severity**: High
+
+**Bug:** Generated RoPE sin/cos for `max_position_embeddings` but used them directly without slicing to input sequence length.
+```python
+# Wrong - uses full max_position_embeddings length
+cos, sin = self.rope(max_length=config.max_position_embeddings)
+# cos/sin shape: (max_position_embeddings, head_dim)
+# But input has shape: (batch, seq_len, hidden_size) where seq_len < max_position_embeddings
+
+# Correct - slice to actual sequence length
+seq_len = x.shape[1]
+cos, sin = self.rope(seq_len)
+# Or generate once and slice:
+cos, sin = cos[:seq_len], sin[:seq_len]
+```
+**Why:** Position embeddings must match the actual sequence length being processed. Using the full `max_position_embeddings` causes shape mismatches in attention when multiplying with queries/keys.
+
+**Test that catches it:** `RuntimeError: The size of tensor a (16) must match the size of tensor b (2048) at non-singleton dimension 1`

@@ -16,6 +16,9 @@ def moe_config():
         hidden_size=256,
         num_attention_heads=8,
         num_key_value_heads=4,  # GQA: 8/4 = 2 heads per KV group
+        num_layers=2,
+        vocab_size=1000,
+        tied_embedding=False,
         max_position_embeddings=128,
         num_experts=4,
         num_experts_per_tok=2,

@@ -24,9 +24,10 @@ class Rope(nn.Module):
         )
 
     def forward(self, x):
+        seq = x.shape[1]
         position_thetas = torch.einsum(
             "i,j->ij",
-            torch.arange(self.config.max_position_embeddings),
+            torch.arange(seq),
             self.theta.repeat(2),
         )
         return torch.sin(position_thetas)[None, None, :, :], torch.cos(position_thetas)[

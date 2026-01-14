@@ -16,6 +16,13 @@ class MoeConfig:
     num_attention_heads: int
     num_key_value_heads: int
 
+    # Layers
+    num_layers: int
+
+    # Vocab
+    vocab_size: int
+    tied_embedding: bool
+
     # RoPE
     rope_theta: float = 10000.0
     max_position_embeddings: int = 2048

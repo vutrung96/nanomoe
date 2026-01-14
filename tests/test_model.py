@@ -8,10 +8,13 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeForCausalLM,
 )
 
-from tests.utils import ATOL, RTOL, copy_weights
-
-# TODO: Import your full model implementation
-# from moe import Qwen3MoeModel as YourQwen3MoeModel
+from nanomoe.model import Model
+from tests.utils import (
+    copy_weights,
+    copy_expert_weights,
+    make_causal_mask,
+    make_causal_mask_bool,
+)
 
 
 def build_model_mapping(config) -> dict[str, str]:
@@ -292,3 +295,129 @@ def test_model_router_logits(test_config):
         expected_shape = (batch_size * seq_len, test_config.num_experts)
         assert router_logit.shape == expected_shape, \
             f"Router logit {i} shape: {router_logit.shape}, expected {expected_shape}"
+
+
+# =============================================================================
+# User Model tests
+# =============================================================================
+
+
+def test_user_model_forward_smoke(moe_config):
+    """Smoke test: Model can run forward pass."""
+    model = Model(moe_config)
+    model.eval()
+
+    batch_size, seq_len = 2, 16
+    torch.manual_seed(42)
+    input_ids = torch.randint(0, moe_config.vocab_size, (batch_size, seq_len))
+    mask = make_causal_mask_bool(seq_len)
+
+    with torch.no_grad():
+        logits = model(input_ids, mask)
+
+    assert logits.shape == (batch_size, seq_len, moe_config.vocab_size)
+
+
+def test_user_model_gradient_smoke(moe_config):
+    """Smoke test: gradients flow through Model."""
+    model = Model(moe_config)
+
+    batch_size, seq_len = 2, 8
+    torch.manual_seed(42)
+    input_ids = torch.randint(0, moe_config.vocab_size, (batch_size, seq_len))
+    mask = make_causal_mask_bool(seq_len)
+
+    logits = model(input_ids, mask)
+    logits.sum().backward()
+
+    assert model.embedding.weight.grad is not None
+    assert model.lm_head.weight.grad is not None
+    assert model.blocks[0].attention.q_proj.weight.grad is not None
+
+
+def build_user_model_mapping(config) -> dict[str, str]:
+    """
+    Build weight mapping from HF Qwen3MoeForCausalLM to user's Model.
+
+    HuggingFace -> User Model naming:
+    - model.embed_tokens -> embedding
+    - model.layers[i].input_layernorm -> blocks[i].norm1
+    - model.layers[i].self_attn -> blocks[i].attention
+    - model.layers[i].post_attention_layernorm -> blocks[i].norm2
+    - model.layers[i].mlp.gate -> blocks[i].moe.router.gate
+    - model.norm -> rms_f
+    - lm_head -> lm_head
+    """
+    mapping = {
+        # Embeddings
+        "model.embed_tokens.weight": "embedding.weight",
+        # Final norm
+        "model.norm.weight": "rms_f.weight",
+        # LM head
+        "lm_head.weight": "lm_head.weight",
+    }
+
+    # Add mappings for each layer
+    for layer_idx in range(config.num_hidden_layers):
+        hf_prefix = f"model.layers.{layer_idx}"
+        user_prefix = f"blocks.{layer_idx}"
+
+        # LayerNorms
+        mapping[f"{hf_prefix}.input_layernorm.weight"] = f"{user_prefix}.norm1.weight"
+        mapping[f"{hf_prefix}.post_attention_layernorm.weight"] = f"{user_prefix}.norm2.weight"
+
+        # Attention
+        mapping[f"{hf_prefix}.self_attn.q_proj.weight"] = f"{user_prefix}.attention.q_proj.weight"
+        mapping[f"{hf_prefix}.self_attn.k_proj.weight"] = f"{user_prefix}.attention.k_proj.weight"
+        mapping[f"{hf_prefix}.self_attn.v_proj.weight"] = f"{user_prefix}.attention.v_proj.weight"
+        mapping[f"{hf_prefix}.self_attn.o_proj.weight"] = f"{user_prefix}.attention.o_proj.weight"
+        mapping[f"{hf_prefix}.self_attn.q_norm.weight"] = f"{user_prefix}.attention.q_norm.weight"
+        mapping[f"{hf_prefix}.self_attn.k_norm.weight"] = f"{user_prefix}.attention.k_norm.weight"
+
+        # Router
+        mapping[f"{hf_prefix}.mlp.gate.weight"] = f"{user_prefix}.moe.router.gate.weight"
+
+    return mapping
+
+
+def test_user_model_vs_hf(test_config, moe_config):
+    """Test user Model output matches HuggingFace Qwen3MoeForCausalLM."""
+    batch_size, seq_len = 2, 16
+
+    torch.manual_seed(42)
+    input_ids = torch.randint(0, test_config.vocab_size, (batch_size, seq_len))
+
+    # Create HF model
+    hf_model = Qwen3MoeForCausalLM(test_config)
+    hf_model.eval()
+
+    # Create user model
+    user_model = Model(moe_config)
+    user_model.eval()
+
+    # Copy weights
+    mapping = build_user_model_mapping(test_config)
+    copy_weights(hf_model, user_model, mapping)
+
+    # Copy expert weights for each layer
+    for layer_idx in range(test_config.num_hidden_layers):
+        hf_moe = hf_model.model.layers[layer_idx].mlp
+        user_experts = user_model.blocks[layer_idx].moe.experts
+        copy_expert_weights(hf_moe, user_experts, test_config.num_experts)
+
+    # Create masks
+    hf_mask = make_causal_mask(seq_len, batch_size)
+    user_mask = make_causal_mask_bool(seq_len)
+
+    with torch.no_grad():
+        hf_outputs = hf_model(input_ids=input_ids, attention_mask=hf_mask)
+        hf_logits = hf_outputs.logits
+
+        user_logits = user_model(input_ids, user_mask)
+
+    # Use relaxed tolerances for full model - errors accumulate across layers
+    model_atol = 1e-3
+    model_rtol = 1e-3
+    max_diff = (hf_logits - user_logits).abs().max().item()
+    assert torch.allclose(hf_logits, user_logits, rtol=model_rtol, atol=model_atol), \
+        f"Model output mismatch. Max diff: {max_diff}"
